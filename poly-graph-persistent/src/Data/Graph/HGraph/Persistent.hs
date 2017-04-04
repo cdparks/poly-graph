@@ -264,10 +264,12 @@ instance
   , UniquenessCheck a
   ) => EnsureUniqueness a (Entity a) as where
   ensureUniqueness a0 graph =
-    loop (getAllOfType graph) a0
+    loop (getAllOfType graph) (0 :: Int) a0
    where
-    loop others a
-      | any (couldCauseUniquenessViolation a) others = arbitrary >>= loop others
+    loop others tries a
+      -- TODO: Make this parameterizable and add Typeable so we can print a typeRep
+      | tries >= 12 = error "Could not create unique entity after 12 attempts"
+      | any (couldCauseUniquenessViolation a) others = arbitrary >>= loop others (tries + 1)
       | otherwise = pure a
 
 -- | Check uniqueness by looking inside Functor-shaped values and ensuring

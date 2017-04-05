@@ -10,7 +10,6 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -28,7 +27,6 @@ import Control.Monad.Logger (LoggingT(..), runStderrLoggingT)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Reader (ReaderT)
 import Control.Monad.Trans.Resource (MonadBaseControl)
-import Data.Maybe (fromMaybe)
 import Data.Monoid (Endo)
 import Data.Proxy (Proxy(..))
 import Data.Text (Text, pack)
@@ -37,8 +35,7 @@ import Database.Persist
 import Database.Persist.Postgresql
 import Database.Persist.TH
 import GHC.Generics (Generic)
-import GHC.TypeLits (KnownNat, natVal)
-import Test.QuickCheck.Arbitrary (Arbitrary(..), vector)
+import Test.QuickCheck.Arbitrary (Arbitrary(..))
 import Test.QuickCheck.Gen (generate, Gen)
 import Text.Shakespeare.Text (st)
 
@@ -48,6 +45,10 @@ import Data.Graph.HGraph.Persistent
 import Data.Graph.HGraph.Persistent.Instances ()
 import Data.Graph.HGraph.Persistent.TH
 import Data.Graph.HGraph.TH
+
+import Common
+import External hiding (testMigrate)
+import qualified External as External
 
 connString :: ConnectionString
 connString = "host=localhost port=5432 user=test dbname=poly-graph password=test"
@@ -69,14 +70,16 @@ resetSequences =
       SELECT SETVAL('state_id_seq', 1, false);
       SELECT SETVAL('student_id_seq', 1, false);
       SELECT SETVAL('teacher_id_seq', 1, false);
+      SELECT SETVAL('foo_id_seq', 1, false);
+      SELECT SETVAL('baz_id_seq', 1, false);
+      SELECT SETVAL('quux_id_seq', 1, false);
+      SELECT SETVAL('merp_id_seq', 1, false);
+      SELECT SETVAL('local_id_seq', 1, false);
+      SELECT SETVAL('external_id_seq', 1, false);
     |]
     []
 
-instance Arbitrary Text where
-  arbitrary = pack . filter (not . isBadChar) <$> arbitrary
-    where isBadChar x = x == '\NUL' || x == '\\' -- Make postgres vomit
-
-share [mkUniquenessChecks sqlSettings { mpsGenerateLenses = True }, mkPersist sqlSettings { mpsGenerateLenses = True },  mkMigrate "testMigrate"] [persistLowerCase|
+share [mkUniquenessChecksIgnoring externalFk testSettings, mkPersist testSettings,  mkMigrate "testMigrate"] [persistLowerCase|
   SelfRef
     name Text
     selfRefId SelfRefId Maybe
@@ -127,6 +130,12 @@ share [mkUniquenessChecks sqlSettings { mpsGenerateLenses = True }, mkPersist sq
     UniqueFooBarBaz foo bar baz -- A nonsensical constraint that has an FK and two plain values
     UniqueWhomp whomp !force -- A second constraint with a nullable field
     deriving Show Eq Generic
+  Local
+    name Text
+    flag Bool
+    external ExternalId external-fk
+    UniqueFlagExternal flag external -- A constraint pointing at an FK that persistent doesn't know about
+    deriving Show Eq Generic
 |]
 
 instance Arbitrary State where
@@ -149,10 +158,8 @@ instance Arbitrary Quux where
   arbitrary = Quux "quux" <$> arbitrary <*> arbitrary
 instance Arbitrary Merp where
   arbitrary = Merp "merp" <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
-instance (KnownNat n, Arbitrary a) => Arbitrary (Sized.Vector n a) where
-  arbitrary =
-    fromMaybe (error "`vector` should return list of requested length") . Sized.fromList <$>
-    vector (fromIntegral (natVal (Proxy :: Proxy n)))
+instance Arbitrary Local where
+  arbitrary = Local "merp" <$> arbitrary <*> arbitrary
 
 instance SelfRef `PointsAt` Entity SelfRef
 instance SelfRef `PointsAt` Maybe (Entity SelfRef)
@@ -167,6 +174,7 @@ instance Foo `PointsAt` Entity Teacher
 instance Baz `PointsAt` Entity Foo
 instance Quux `PointsAt` Entity Foo
 instance Merp `PointsAt` Entity Foo
+instance Local `PointsAt` Entity External
 
 _entityKey :: Lens' (Entity a) (Key a)
 _entityKey pure' (Entity i e) = (\i' -> Entity i' e) <$> pure' i
@@ -174,7 +182,9 @@ _entityKey pure' (Entity i e) = (\i' -> Entity i' e) <$> pure' i
 type M = ReaderT SqlBackend (LoggingT IO)
 main :: IO ()
 main = do
-  runConn $ runMigrationUnsafe testMigrate
+  runConn $ do
+    runMigrationUnsafe External.testMigrate
+    runMigrationUnsafe testMigrate
   hspec $
     describe "poly-graph-persistent" $ do
       it "works with plucked lenses" $ do
@@ -414,6 +424,26 @@ main = do
                    '[ '("Merp1", '["Foo"], Entity Merp)
                     , '("Merp2", '["Foo"], Entity Merp)
                     , '("Foo", '[], Entity Foo)
+                    ]
+                 )
+        pure ()
+      it "ignores the component of a unique constraint marked with 'external-fk'" $ db $ do
+        graph <-
+          liftIO (generate (ensureGraphUniqueness =<< fmap unRawGraph arbitrary))
+            :: M (
+                 HGraph
+                   '[ '("Local1", '["External"], Local)
+                    , '("Local2", '["External"], Local)
+                    , '("External", '[], External)
+                    ]
+                 )
+        graph' <-
+          insertGraph graph
+            :: M (
+                 HGraph
+                   '[ '("Local1", '["External"], Entity Local)
+                    , '("Local2", '["External"], Entity Local)
+                    , '("External", '[], Entity External)
                     ]
                  )
         pure ()

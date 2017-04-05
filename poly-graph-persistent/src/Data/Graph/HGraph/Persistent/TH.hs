@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE QuasiQuotes #-}
@@ -5,7 +6,7 @@
 module Data.Graph.HGraph.Persistent.TH
   ( UniquenessCheck(..)
   , mkUniquenessChecks
-  , mkUniquenessCheck
+  , mkUniquenessChecksIgnoring
   ) where
 
 import Control.Arrow ((&&&))
@@ -89,16 +90,26 @@ class UniquenessCheck a where
 -- to actually point to other entities yet, so we can't rely on them contributing
 -- to uniqueness.
 mkUniquenessChecks :: MkPersistSettings -> [EntityDef] -> Q [Dec]
-mkUniquenessChecks settings = fmap concat . traverse (mkUniquenessCheck settings)
+mkUniquenessChecks = mkUniquenessChecksInternal Nothing
 
-mkUniquenessCheck :: MkPersistSettings -> EntityDef -> Q [Dec]
-mkUniquenessCheck settings def = do
+-- | This is just like 'mkUniquenessChecks' but the user can pass an attrbute to
+-- match fields that should be ignored. Useful if you defined all of your entities
+-- in separate 'Database.Persist.Quasi.persistLowerCase' blocks and therefore do not
+-- have any ForeignRefs (according to persistent).
+mkUniquenessChecksIgnoring :: Attr -> MkPersistSettings -> [EntityDef] -> Q [Dec]
+mkUniquenessChecksIgnoring = mkUniquenessChecksInternal . Just
+
+mkUniquenessChecksInternal :: Maybe Attr -> MkPersistSettings -> [EntityDef] -> Q [Dec]
+mkUniquenessChecksInternal mAttr settings = fmap concat . traverse (mkUniquenessCheck mAttr settings)
+
+mkUniquenessCheck :: Maybe Attr -> MkPersistSettings -> EntityDef -> Q [Dec]
+mkUniquenessCheck mAttr settings def = do
   lhs <- newName "_lhs"
   rhs <- newName "_rhs"
-  mkUniquenessCheckWithOperands settings def (lhs, rhs)
+  mkUniquenessCheckWithOperands mAttr settings def (lhs, rhs)
 
-mkUniquenessCheckWithOperands :: MkPersistSettings -> EntityDef -> (Name, Name) -> Q [Dec]
-mkUniquenessCheckWithOperands settings EntityDef{..} operands@(lhs, rhs) =
+mkUniquenessCheckWithOperands :: Maybe Attr -> MkPersistSettings -> EntityDef -> (Name, Name) -> Q [Dec]
+mkUniquenessCheckWithOperands mAttr settings EntityDef{..} operands@(lhs, rhs) =
   [d|
     instance UniquenessCheck $typeName where
       couldCauseUniquenessViolation $(varP lhs) $(varP rhs) = $expr
@@ -106,7 +117,7 @@ mkUniquenessCheckWithOperands settings EntityDef{..} operands@(lhs, rhs) =
  where
   unHaskelled = unHaskellName entityHaskell
   typeName = conT $ mkName $ unpack unHaskelled
-  fieldMap = mkFieldMap entityFields
+  fieldMap = mkFieldMap mAttr entityFields
 
   expr = pure $ mkOrExpr mkSelector fieldMap operands entityUniques
 
@@ -120,12 +131,13 @@ mkUniquenessCheckWithOperands settings EntityDef{..} operands@(lhs, rhs) =
 
 type FieldMap = Map HaskellName (ReferenceDef, IsNullable)
 
-mkFieldMap :: [FieldDef] -> FieldMap
-mkFieldMap =
-  Map.fromList . map mkPair
+mkFieldMap :: Maybe Attr -> [FieldDef] -> FieldMap
+mkFieldMap mAttr =
+  Map.fromList . mapMaybe mkPair
  where
-  mkPair FieldDef{..} =
-    (fieldHaskell, (fieldReference, nullable fieldAttrs))
+  mkPair FieldDef{..}
+    | Just attr <- mAttr, attr `elem` fieldAttrs = Nothing
+    | otherwise = pure (fieldHaskell, (fieldReference, nullable fieldAttrs))
 
 lowerFirst :: Text -> Text
 lowerFirst t =
@@ -153,15 +165,16 @@ mkAndExpr mkSelector fieldMap operands UniqueDef{..} =
  where
   andOp = VarE $ mkName "&&"
   fields = map fst uniqueFields
-  nonForeignFields = mapMaybe (uncurry comparisonType . (id &&& (fieldMap Map.!))) fields
+  nonForeignFields = mapMaybe (uncurry comparisonType . (id &&& (`Map.lookup` fieldMap))) fields
   comparisons = map (mkComparison mkSelector operands) nonForeignFields
 
 data ComparisonType
   = PlainEquality HaskellName
   | OnlyNonNull HaskellName
 
-comparisonType :: HaskellName -> (ReferenceDef, IsNullable) -> Maybe ComparisonType
-comparisonType name pair =
+comparisonType :: HaskellName -> Maybe (ReferenceDef, IsNullable) -> Maybe ComparisonType
+comparisonType name mPair = do
+  pair <- mPair
   case pair of
     (ForeignRef{}, _) -> Nothing
     (_, Nullable{}) -> pure (OnlyNonNull name)

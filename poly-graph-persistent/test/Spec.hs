@@ -79,7 +79,7 @@ resetSequences =
     |]
     []
 
-share [mkUniquenessChecksIgnoring externalFk testSettings, mkPersist testSettings,  mkMigrate "testMigrate"] [persistLowerCase|
+share [mkPersist testSettings,  mkMigrate "testMigrate"] [persistLowerCase|
   SelfRef
     name Text
     selfRefId SelfRefId Maybe
@@ -133,7 +133,7 @@ share [mkUniquenessChecksIgnoring externalFk testSettings, mkPersist testSetting
   Local
     name Text
     flag Bool
-    external ExternalId external-fk
+    external ExternalId
     UniqueFlagExternal flag external -- A constraint pointing at an FK that persistent doesn't know about
     deriving Show Eq Generic
 |]
@@ -175,6 +175,8 @@ instance Baz `PointsAt` Entity Foo
 instance Quux `PointsAt` Entity Foo
 instance Merp `PointsAt` Entity Foo
 instance Local `PointsAt` Entity External
+
+$mkUniquenessChecks
 
 _entityKey :: Lens' (Entity a) (Key a)
 _entityKey pure' (Entity i e) = (\i' -> Entity i' e) <$> pure' i

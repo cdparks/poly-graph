@@ -21,9 +21,10 @@ import GHC.Generics (Generic)
 import Test.QuickCheck.Arbitrary (Arbitrary(..))
 
 import Data.Graph.HGraph.Persistent.TH
+
 import Common
 
-share [mkUniquenessChecksIgnoring externalFk testSettings, mkPersist testSettings,  mkMigrate "testMigrate"] [persistLowerCase|
+share [mkPersist testSettings,  mkMigrate "testMigrate"] [persistLowerCase|
   External
     name Text
     position Int
@@ -33,3 +34,5 @@ share [mkUniquenessChecksIgnoring externalFk testSettings, mkPersist testSetting
 
 instance Arbitrary External where
   arbitrary = External "external" <$> arbitrary
+
+$(mkUniquenessChecksFor ''External)

@@ -1,39 +1,28 @@
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE QuasiQuotes #-}
 
 module Data.Graph.HGraph.Persistent.TH
-  ( UniquenessCheck(..)
+  ( NullableEqualityModuloFKs(..)
+  , couldCauseUniquenessViolation
   , mkUniquenessChecks
-  , mkUniquenessChecksIgnoring
+  , mkUniquenessChecksFor
   ) where
 
-import Control.Arrow ((&&&))
-import Data.Char (toLower, toUpper)
-import Data.List.NonEmpty (nonEmpty)
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import Data.Maybe (mapMaybe)
-import Data.Monoid ((<>))
-import Data.Text (Text, unpack, cons, uncons)
 import Database.Persist
-import Database.Persist.Quasi (nullable)
-import Database.Persist.TH
 import Language.Haskell.TH
+import Data.Graph.HGraph.Persistent.TH.Internal
 
 -- | 'couldCauseUniquenessViolation' returns 'True' if its arguments violate
 -- at least one uniqueness constraint on that type, ignoring foreign keys.
-class UniquenessCheck a where
-  couldCauseUniquenessViolation :: a -> a -> Bool
+couldCauseUniquenessViolation :: (PersistEntity a, NullableEqualityModuloFKs (Unique a)) => a -> a -> Bool
+couldCauseUniquenessViolation lhs rhs =
+  or (zipWith nullableEqualityModuloFKs (persistUniqueKeys lhs) (persistUniqueKeys rhs))
 
--- | Use 'mkUniquenessChecks' in 'Database.Persist.TH.share' with the same
--- settings passed to 'Database.Persist.TH.mkPersist' to generate instances
--- for 'UniquenessCheck'. For example:
+-- | Use 'mkUniquenessChecks' to generate instances for 'NullableEqualityModuloFKs'.
+-- For example:
 --
 -- > share
--- >   [ mkUniquenessChecks sqlSettings
--- >   , mkPersist sqlSettings
+-- >   [ mkPersist sqlSettings
 -- >   , mkMigrate "migrate"
 -- >   ]
 -- >   [persistLowerCase|
@@ -48,39 +37,42 @@ class UniquenessCheck a where
 -- >       authorId AuthorId
 -- >       publicationDate Date
 -- >       isbn ISBN
+-- >       notes NotesId Maybe
 -- >       UniquePublicationInfo authorId title publicationDate
 -- >       UniqueISBN isbn
 -- >       deriving Show Eq Generic
+-- >     Notes
+-- >       notes Text
+-- >       deriving Show Eq Generic
 -- >   |]
+-- >
+-- > $mkUniquenessChecks
 --
--- This will generate the following 'UniquenessCheck' instances:
+-- 'mkUniquenessChecks' generates a 'NullableEqualityModuloFKs' instance for
+-- each 'Unique' instance in scope that doesn't already have one.
 --
--- > class UniquenessCheck Author where
--- >   couldCauseUniquenessViolation lhs rhs =
--- >     authorName lhs == authorName rhs == ||
--- >     maybe False ((==) <$> pseudonym lhs <*> pseudonym rhs)
+-- > instance NullableEqualityModuloFKs Author where
+-- >   nullableEqualityModuloFKs _lhs _rhs =
+-- >     case (_lhs, _rhs) of
+-- >       (UniqueAuthorName _lhsName, UniqueAuthorName _rhsName) ->
+-- >         _lhsName == _rhsName
+-- >       (UniqueAuthoPseudonym _lhsPseudonym, UniqueAuthoPseudonym _rhsPseudonym) ->
+-- >         maybe False ((==) <$> _lhsPseudonym <*> _rhsPseudonym)
+-- >       _ -> False
 -- >
--- > class UniquenessCheck Book where
--- >   couldCauseUniquenessViolation lhs rhs =
--- >     bookTitle lhs == bookTitle rhs &&
--- >     bookPublicationDate lhs == bookPublicationDate rhs ||
--- >     bookIsbn lhs == bookIsbn rhs
---
--- The format of each function body is roughly:
---
--- > {-
--- >   orExpr = andExpr [|| orExpr]
+-- > instance NullableEqualityModuloFKs Book where
+-- >   nullableEqualityModuloFKs _lhs _rhs =
+-- >     case (_lhs, _rhs) of
+-- >       ( UniquePublicationInfo _lhsAuthorId _lhsTitle _lhsPublicationDate
+-- >       , UniquePublicationInfo _rhsAuthorId _rhsTitle _rhsPublicationDate) ->
+-- >        _lhsTitle == _rhsTitle &&
+-- >        _lhsPublicationDate == _rhsPublicationDate
+-- >       (UniqueISBN _lhsIsbn, UniqueISBN _rhsIsbn) ->
+-- >         _lhsIsbn == _rhsIsbn
+-- >       _ -> False
 -- >
--- >   andExpr = comparison [&& andExpr]
--- >
--- >   comparison
--- >     = nonNullComparison
--- >     | nullableComparison
--- >
--- >   nonNullComparison = selector lhs == selector rhs
--- >
--- >   nullableComparison = maybe False ((==) <$> selector lhs <*> selector rhs)
--- > -}
+-- > instance NullableEqualityModuloFKs Notes where
+-- >   nullableEqualityModuloFKs _lhs _rhs = False
 --
 -- Note the difference in how non-null fields are compared versus how nullable
 -- fields are compared. In Haskell, 'Nothing' is equal to 'Nothing', but in SQL,
@@ -89,121 +81,24 @@ class UniquenessCheck a where
 -- Additionally the foreign keys aren't compared since they haven't been updated
 -- to actually point to other entities yet, so we can't rely on them contributing
 -- to uniqueness.
-mkUniquenessChecks :: MkPersistSettings -> [EntityDef] -> Q [Dec]
-mkUniquenessChecks = mkUniquenessChecksInternal Nothing
+--
+-- Entities with no 'Unique' constructors always return 'False' for
+-- 'nullableEqualityModuloFKs'.
+--
+-- Finally, we add a catch-all pattern if the entity has more than one 'Unique'
+-- constructor. Because unique constructors will be compared pair-wise in a
+-- predictable order, we should never hit this case, but ghc doesn't know this,
+-- and we want to avoid generating an incomplete-pattern warning.
+mkUniquenessChecks :: Q [Dec]
+mkUniquenessChecks = fmap concat . traverse mkInstance =<< warnEmpty =<< availableUniqueInstances
 
--- | This is just like 'mkUniquenessChecks' but the user can pass an attrbute to
--- match fields that should be ignored. Useful if you defined all of your entities
--- in separate 'Database.Persist.Quasi.persistLowerCase' blocks and therefore do not
--- have any ForeignRefs (according to persistent).
-mkUniquenessChecksIgnoring :: Attr -> MkPersistSettings -> [EntityDef] -> Q [Dec]
-mkUniquenessChecksIgnoring = mkUniquenessChecksInternal . Just
-
-mkUniquenessChecksInternal :: Maybe Attr -> MkPersistSettings -> [EntityDef] -> Q [Dec]
-mkUniquenessChecksInternal mAttr settings = fmap concat . traverse (mkUniquenessCheck mAttr settings)
-
-mkUniquenessCheck :: Maybe Attr -> MkPersistSettings -> EntityDef -> Q [Dec]
-mkUniquenessCheck mAttr settings def = do
-  lhs <- newName "_lhs"
-  rhs <- newName "_rhs"
-  mkUniquenessCheckWithOperands mAttr settings def (lhs, rhs)
-
-mkUniquenessCheckWithOperands :: Maybe Attr -> MkPersistSettings -> EntityDef -> (Name, Name) -> Q [Dec]
-mkUniquenessCheckWithOperands mAttr settings EntityDef{..} operands@(lhs, rhs) =
-  [d|
-    instance UniquenessCheck $typeName where
-      couldCauseUniquenessViolation $(varP lhs) $(varP rhs) = $expr
-  |]
- where
-  unHaskelled = unHaskellName entityHaskell
-  typeName = conT $ mkName $ unpack unHaskelled
-  fieldMap = mkFieldMap mAttr entityFields
-
-  expr = pure $ mkOrExpr mkSelector fieldMap operands entityUniques
-
-  mkSelector = mkName . unpack . maybeUnderscore . maybePrefixed
-  maybeUnderscore fieldName
-   | mpsGenerateLenses settings = '_' `cons` fieldName
-   | otherwise = fieldName
-  maybePrefixed fieldName
-   | mpsPrefixFields settings = lowerFirst unHaskelled <> upperFirst (unHaskellName fieldName)
-   | otherwise = unHaskellName fieldName
-
-type FieldMap = Map HaskellName (ReferenceDef, IsNullable)
-
-mkFieldMap :: Maybe Attr -> [FieldDef] -> FieldMap
-mkFieldMap mAttr =
-  Map.fromList . mapMaybe mkPair
- where
-  mkPair FieldDef{..}
-    | Just attr <- mAttr, attr `elem` fieldAttrs = Nothing
-    | otherwise = pure (fieldHaskell, (fieldReference, nullable fieldAttrs))
-
-lowerFirst :: Text -> Text
-lowerFirst t =
-  case uncons t of
-    Just (c, cs) -> cons (toLower c) cs
-    Nothing -> t
-
-upperFirst :: Text -> Text
-upperFirst t =
-  case uncons t of
-    Just (c, cs) -> cons (toUpper c) cs
-    Nothing -> t
-
-mkOrExpr :: (HaskellName -> Name) -> FieldMap -> (Name, Name) -> [UniqueDef] -> Exp
-mkOrExpr mkSelector fieldMap operands uniqueDefs =
-  maybe false (foldl1 $ binApp orOp) (nonEmpty andExprs)
- where
-  false = ConE $ mkName "False"
-  orOp = VarE $ mkName "||"
-  andExprs = mapMaybe (mkAndExpr mkSelector fieldMap operands) uniqueDefs
-
-mkAndExpr :: (HaskellName -> Name) -> FieldMap -> (Name, Name) -> UniqueDef -> Maybe Exp
-mkAndExpr mkSelector fieldMap operands UniqueDef{..} =
-  foldl1 (binApp andOp) <$> nonEmpty comparisons
- where
-  andOp = VarE $ mkName "&&"
-  fields = map fst uniqueFields
-  nonForeignFields = mapMaybe (uncurry comparisonType . (id &&& (`Map.lookup` fieldMap))) fields
-  comparisons = map (mkComparison mkSelector operands) nonForeignFields
-
-data ComparisonType
-  = PlainEquality HaskellName
-  | OnlyNonNull HaskellName
-
-comparisonType :: HaskellName -> Maybe (ReferenceDef, IsNullable) -> Maybe ComparisonType
-comparisonType name mPair = do
-  pair <- mPair
-  case pair of
-    (ForeignRef{}, _) -> Nothing
-    (_, Nullable{}) -> pure (OnlyNonNull name)
-    (_, NotNullable) -> pure (PlainEquality name)
-
-mkComparison :: (HaskellName -> Name) -> (Name, Name) -> ComparisonType -> Exp
-mkComparison mkSelector operands (PlainEquality name) = mkEqComparison operands (mkSelector name)
-mkComparison mkSelector operands (OnlyNonNull name) = mkNonNullEqComparison operands (mkSelector name)
-
-mkEqComparison :: (Name, Name) -> Name -> Exp
-mkEqComparison (lhs, rhs) selector =
-  binApp
-    (VarE $ mkName "==")
-    (VarE selector `AppE` VarE lhs)
-    (VarE selector `AppE` VarE rhs)
-
-mkNonNullEqComparison :: (Name, Name) -> Name -> Exp
-mkNonNullEqComparison (lhs, rhs) selector =
-  VarE (mkName "maybe")
-    `AppE` ConE (mkName "False")
-    `AppE` VarE (mkName "id")
-    `AppE` ParensE
-      (binApp
-        (VarE $ mkName "<*>")
-        (binApp
-          (VarE $ mkName "<$>")
-          (VarE $ mkName "==")
-          (VarE selector `AppE` VarE lhs))
-        (VarE selector `AppE` VarE rhs))
-
-binApp :: Exp -> Exp -> Exp -> Exp
-binApp f x y = UInfixE x f y
+-- | Use 'mkUniquenessChecksFor' with a specific name to generate an instances
+-- for 'NullableEqualityModuloFKs' for that entity's 'Unique' instance. This plays
+-- nice with 'mkUniquenessChecks' which only generates 'NullableEqualityModuloFKs'
+-- instances for 'Unique' instances that don't already have one.
+mkUniquenessChecksFor :: Name -> Q [Dec]
+mkUniquenessChecksFor name = do
+  instances <- reifyInstances ''Unique [ConT name]
+  case instances of
+    [uniqueInstance] -> mkInstance (unpackDataInstance uniqueInstance)
+    _ -> fail $ "`" ++ show name ++ "`must have a data instance for `Unique`"

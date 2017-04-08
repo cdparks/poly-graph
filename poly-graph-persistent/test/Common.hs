@@ -27,6 +27,3 @@ instance (KnownNat n, Arbitrary a) => Arbitrary (Sized.Vector n a) where
 
 testSettings :: MkPersistSettings
 testSettings = sqlSettings { mpsGenerateLenses = True }
-
-externalFk :: Attr
-externalFk = "external-fk"

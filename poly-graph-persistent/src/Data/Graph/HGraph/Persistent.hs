@@ -33,7 +33,7 @@ import Test.QuickCheck.Gen (generate, Gen)
 import Data.Graph.HGraph
 import Data.Graph.HGraph.Instances
 import Data.Graph.HGraph.Internal
-import Data.Graph.HGraph.Persistent.TH (UniquenessCheck(..))
+import Data.Graph.HGraph.Persistent.TH (NullableEqualityModuloFKs(..), couldCauseUniquenessViolation)
 
 instance
   Key a `FieldPointsAt` Entity a where
@@ -261,7 +261,7 @@ instance
   ( PersistEntity a
   , GetAllOfType as a
   , Arbitrary a
-  , UniquenessCheck a
+  , NullableEqualityModuloFKs (Unique a)
   ) => EnsureUniqueness a (Entity a) as where
   ensureUniqueness a0 graph =
     loop (getAllOfType graph) a0
@@ -295,7 +295,7 @@ class DoesNodeSatisfyUniqueness a b | a -> b, b -> a where
 instance
   ( Foldable f
   , PersistEntity a
-  , UniquenessCheck a
+  , NullableEqualityModuloFKs (Unique a)
   ) => DoesNodeSatisfyUniqueness (f a) (f (Entity a)) where
   doesNodeSatisfyUniqueness fa =
     length (List.nubBy couldCauseUniquenessViolation items) == length items

@@ -83,12 +83,18 @@ mkComparisons binds =
   NormalB . foldl1 (binApp $ VarE $ mkName "&&") <$> nonEmpty (mapMaybe mkComparison binds)
 
 mkComparison :: (Type, Name, Name) -> Maybe Exp
-mkComparison (ty, lhs, rhs) =
-  case ty of
-   AppT (ConT outer) _
-    | outer == ''Key -> Nothing -- ignore foreign keys
-    | outer == ''Maybe -> pure $ mkNonNullEqComparison lhs rhs
-   _ -> pure $ mkEqComparison lhs rhs
+mkComparison (ty, lhs, rhs)
+  | isForeignKey ty = Nothing
+  | isNullable ty = pure $ mkNonNullEqComparison lhs rhs
+  | otherwise = pure $ mkEqComparison lhs rhs
+ where
+  -- Only worry about keys and nullable keys
+  isForeignKey (AppT (ConT outer) inner) = outer == ''Key || outer == ''Maybe && isForeignKey inner
+  isForeignKey _ = False
+
+  -- TODO: arbitrary depth
+  isNullable (AppT (ConT outer) _) = outer == ''Maybe
+  isNullable _ = False
 
 mkEqComparison :: Name -> Name -> Exp
 mkEqComparison lhs rhs =

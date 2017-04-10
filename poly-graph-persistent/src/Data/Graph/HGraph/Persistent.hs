@@ -235,7 +235,7 @@ ensureGraphUniqueness
 ensureGraphUniqueness = ensureGraphUniqueness' (Proxy :: Proxy ('[] :: [*]))
 
 class
-  EnsureGraphUniqueness (ps :: [*]) (a :: [(k, [k], *)]) (b :: [(k, [k], *)]) | a -> b, b -> a where
+  EnsureGraphUniqueness (ps :: [*]) (a :: [(k, [k], *)]) (b :: [(k, [k], *)]) where
   ensureGraphUniqueness' :: (WrapAll a ~ b) => Proxy ps -> HGraph a -> Gen (HGraph a)
 
 instance EnsureGraphUniqueness ps '[] '[] where
@@ -253,7 +253,7 @@ instance
     pure $ Node uniqueItem `Cons` uniquedGraph
 
 -- | Update a to be unique in HGraph as
-class EnsureUniqueness a b as | a -> b, b -> a where
+class EnsureUniqueness a b as where
   ensureUniqueness :: (Wrap a ~ b) => a -> HGraph as -> Gen a
 
 -- | Check uniqueness for a by its Uniques modulo FKs

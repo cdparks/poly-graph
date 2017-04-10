@@ -31,7 +31,7 @@ noInstanceYet :: Type -> Q Bool
 noInstanceYet ty = not <$> isInstance ''NullableEqualityModuloFKs [ConT ''Unique `AppT` ty]
 
 unpackDataInstance :: Dec -> (Type, [Con])
-unpackDataInstance (DataInstD _ _ [ty] cons _) = (ty, cons)
+unpackDataInstance (DataInstD _ _ [ty] _ cons _) = (ty, cons)
 unpackDataInstance _ = error "Expected data instance for `Unique`"
 
 mkInstance :: (Type, [Con]) -> Q [Dec]
